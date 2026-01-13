@@ -6,7 +6,7 @@ import dynamic from 'next/dynamic';
 import axios from 'axios';
 import { PlaceDetails } from '@/lib/googlePlaces';
 import { Itinerary } from '@/lib/itineraryPlanner';
-import { Star, Loader2 } from 'lucide-react';
+import { Star, Loader2, Sparkles } from 'lucide-react';
 
 import TravelHeader from '@/components/TravelHeader';
 import PopularPlacesList from '@/components/PopularPlacesList';
@@ -52,7 +52,7 @@ function TravelPageContent() {
             };
             setItinerary(initialItinerary);
         }
-    }, [days, destination]); // Only run if days/destination changes and itinerary is null
+    }, [days, destination]);
 
     useEffect(() => {
         if (!destination) return;
@@ -83,10 +83,22 @@ function TravelPageContent() {
                 destination,
                 days,
                 budget,
-                dates: date ? [date] : [], // Simplification: pass start date
+                dates: date ? [date] : [],
                 preferences
             });
-            setItinerary(res.data);
+            // Ensure AI items have IDs
+            const data = res.data;
+            data.itinerary.forEach((day: any) => {
+                ['morning', 'afternoon', 'evening'].forEach(period => {
+                    if (day[period]?.activities) {
+                        day[period].activities = day[period].activities.map((a: any) => ({
+                            ...a,
+                            id: a.id || (a.name + Math.random().toString(36).substr(2, 9))
+                        }));
+                    }
+                });
+            });
+            setItinerary(data);
         } catch (e) {
             console.error("Failed to generate itinerary", e);
             alert("Failed to generate itinerary. Please try again.");
@@ -102,7 +114,6 @@ function TravelPageContent() {
         const dayPlan = updatedItinerary.itinerary.find(d => d.day === day);
 
         if (dayPlan) {
-            // Determine period based on time (simple logic)
             const hour = parseInt(time.split(':')[0]);
             let period: 'morning' | 'afternoon' | 'evening' = 'morning';
             if (hour >= 12 && hour < 17) period = 'afternoon';
@@ -112,6 +123,7 @@ function TravelPageContent() {
             if (!dayPlan[period].activities) dayPlan[period].activities = [];
             // @ts-ignore
             dayPlan[period].activities.push({
+                id: place.place_id + Date.now(), // Ensure unique ID
                 name: place.name,
                 time: time,
                 address: place.address,
@@ -119,6 +131,7 @@ function TravelPageContent() {
                 cost: 'TBD',
                 place_id: place.place_id,
                 rating: place.rating,
+                photoUrl: place.photoUrl // Pass photo URL
             });
 
             // Sort by time
@@ -126,6 +139,36 @@ function TravelPageContent() {
             dayPlan[period].activities.sort((a, b) => a.time.localeCompare(b.time));
         }
 
+        setItinerary(updatedItinerary);
+    };
+
+    const handleRemoveActivity = (day: number, period: string, activityId: string) => {
+        if (!itinerary) return;
+        const updatedItinerary = { ...itinerary };
+        const dayPlan = updatedItinerary.itinerary.find(d => d.day === day);
+        if (dayPlan) {
+            // @ts-ignore
+            if (dayPlan[period]?.activities) {
+                // @ts-ignore
+                dayPlan[period].activities = dayPlan[period].activities.filter((a: any) =>
+                    (a.id || a.name + a.time) !== activityId
+                );
+            }
+        }
+        setItinerary(updatedItinerary);
+    };
+
+    const handleReorderActivities = (day: number, period: string, newOrder: any[]) => {
+        if (!itinerary) return;
+        const updatedItinerary = { ...itinerary };
+        const dayPlan = updatedItinerary.itinerary.find(d => d.day === day);
+        if (dayPlan) {
+            // @ts-ignore
+            if (dayPlan[period]) {
+                // @ts-ignore
+                dayPlan[period].activities = newOrder;
+            }
+        }
         setItinerary(updatedItinerary);
     };
 
@@ -153,9 +196,9 @@ function TravelPageContent() {
                         <button
                             onClick={generateItinerary}
                             disabled={loadingItinerary}
-                            className="flex-1 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium shadow-sm transition-colors flex items-center justify-center gap-2"
+                            className="w-full flex items-center justify-center gap-2 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium shadow-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                         >
-                            {loadingItinerary ? <Loader2 className="w-4 h-4 animate-spin" /> : <Star className="w-4 h-4" />}
+                            {loadingItinerary ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
                             {itinerary && itinerary.summary && itinerary.summary !== `Trip to ${destination}` ? 'Regenerate Itinerary' : 'Auto-Generate Itinerary'}
                         </button>
                     </div>
@@ -173,6 +216,8 @@ function TravelPageContent() {
                             itinerary={itinerary}
                             destination={destination}
                             onAddActivity={handleAddActivity}
+                            onRemoveActivity={handleRemoveActivity}
+                            onReorderActivities={handleReorderActivities}
                         />
                     ) : (
                         !loadingItinerary && <PopularPlacesList places={popularPlaces} loading={loadingPlaces} />

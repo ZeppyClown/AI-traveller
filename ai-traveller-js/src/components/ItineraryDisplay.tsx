@@ -1,23 +1,77 @@
 import { useState } from 'react';
 import { PlaceDetails } from '@/lib/googlePlaces';
 import { Itinerary } from '@/lib/itineraryPlanner';
-import { Cloud, MapPin, DollarSign } from 'lucide-react';
+import { Cloud, Plus, X } from 'lucide-react';
+import {
+    DndContext,
+    closestCenter,
+    KeyboardSensor,
+    PointerSensor,
+    useSensor,
+    useSensors,
+    DragOverlay,
+    DragEndEvent,
+    DragStartEvent
+} from '@dnd-kit/core';
+import {
+    arrayMove,
+    SortableContext,
+    sortableKeyboardCoordinates,
+    verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+
 import PlaceSearch from './PlaceSearch';
+import { SortableActivityItem } from './SortableActivityItem';
 
 interface ItineraryDisplayProps {
     itinerary: Itinerary;
     destination: string;
     onAddActivity: (day: number, place: PlaceDetails, time: string) => void;
+    onRemoveActivity: (day: number, period: string, activityId: string) => void;
+    onReorderActivities: (day: number, period: string, newOrder: any[]) => void;
 }
 
-export default function ItineraryDisplay({ itinerary, destination, onAddActivity }: ItineraryDisplayProps) {
+export default function ItineraryDisplay({
+    itinerary,
+    destination,
+    onAddActivity,
+    onRemoveActivity,
+    onReorderActivities
+}: ItineraryDisplayProps) {
+
     const [addingToDay, setAddingToDay] = useState<number | null>(null);
     const [selectedTime, setSelectedTime] = useState('09:00');
+    const [activeId, setActiveId] = useState<string | null>(null);
+
+    const sensors = useSensors(
+        useSensor(PointerSensor),
+        useSensor(KeyboardSensor, {
+            coordinateGetter: sortableKeyboardCoordinates,
+        })
+    );
 
     const handleAddSubmit = (day: number, place: PlaceDetails) => {
         onAddActivity(day, place, selectedTime);
         setAddingToDay(null);
     };
+
+    // Helper to handle drag end
+    const handleDragEnd = (event: DragEndEvent, day: number, period: string, activities: any[]) => {
+        const { active, over } = event;
+
+        if (active.id !== over?.id) {
+            const oldIndex = activities.findIndex((item) => (item.id || item.name + item.time) === active.id);
+            const newIndex = activities.findIndex((item) => (item.id || item.name + item.time) === over?.id);
+
+            const newOrder = arrayMove(activities, oldIndex, newIndex);
+            onReorderActivities(day, period, newOrder);
+        }
+        setActiveId(null);
+    };
+
+    const handleDragStart = (event: DragStartEvent) => {
+        setActiveId(event.active.id as string);
+    }
 
     return (
         <div className="space-y-6">
@@ -32,8 +86,8 @@ export default function ItineraryDisplay({ itinerary, destination, onAddActivity
             )}
 
             {itinerary.itinerary.map((day) => (
-                <div key={day.day} className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-                    <div className="bg-gray-50 px-4 py-3 border-b border-gray-200 flex justify-between items-center">
+                <div key={day.day} className="bg-white rounded-xl border border-gray-200 shadow-sm relative">
+                    <div className="bg-gray-50 px-4 py-3 border-b border-gray-200 rounded-t-xl flex justify-between items-center">
                         <h3 className="font-semibold text-gray-900">Day {day.day}</h3>
                         <div className="flex items-center gap-2">
                             {day.weather_data && (
@@ -49,69 +103,76 @@ export default function ItineraryDisplay({ itinerary, destination, onAddActivity
                         {['morning', 'afternoon', 'evening'].map((period) => {
                             // @ts-ignore
                             const section = day[period];
-                            if (!section?.activities?.length) return null;
+                            // Ensure we have IDs for DND
+                            const activities = (section?.activities || []).map((act: any) => ({
+                                ...act,
+                                id: act.id || act.name + act.time // fallback ID
+                            }));
+
+                            if (activities.length === 0) return null;
 
                             return (
                                 <div key={period} className="relative pl-4 border-l-2 border-gray-100">
                                     <div className="absolute -left-[5px] top-0 w-2 h-2 rounded-full bg-blue-400"></div>
                                     <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">{period}</h4>
-                                    <div className="space-y-4">
-                                        {section.activities.map((act: any, idx: number) => (
-                                            <div key={idx} className="group hover:bg-gray-50 rounded-lg -ml-2 p-2 transition-colors">
-                                                <div className="flex justify-between items-start mb-1">
-                                                    <h5 className="font-medium text-gray-900">{act.name}</h5>
-                                                    <span className="text-xs font-mono text-gray-500 bg-gray-100 px-1 py-0.5 rounded">{act.time}</span>
-                                                </div>
-                                                <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
-                                                    <MapPin className="w-3 h-3" />
-                                                    {act.address || 'Location details'}
-                                                </div>
-                                                <div className="flex items-center gap-2 text-xs text-gray-500">
-                                                    <DollarSign className="w-3 h-3" />
-                                                    {act.cost || 'Free'}
-                                                </div>
-                                                {act.weather_adjusted && (
-                                                    <p className="text-xs text-amber-600 mt-1 italic">
-                                                        ⚠️ Adjusted for weather: {act.weather_note}
-                                                    </p>
-                                                )}
+
+                                    <DndContext
+                                        sensors={sensors}
+                                        collisionDetection={closestCenter}
+                                        onDragStart={handleDragStart}
+                                        onDragEnd={(e) => handleDragEnd(e, day.day, period, activities)}
+                                    >
+                                        <SortableContext
+                                            items={activities.map((a: any) => a.id)}
+                                            strategy={verticalListSortingStrategy}
+                                        >
+                                            <div className="space-y-2">
+                                                {activities.map((act: any) => (
+                                                    <SortableActivityItem
+                                                        key={act.id}
+                                                        activity={act}
+                                                        onRemove={() => onRemoveActivity(day.day, period, act.id)}
+                                                    />
+                                                ))}
                                             </div>
-                                        ))}
-                                    </div>
+                                        </SortableContext>
+                                        {/* Overlay could be added here for smoother drag visuals */}
+                                    </DndContext>
                                 </div>
                             );
                         })}
 
                         {/* Add Place UI */}
                         {addingToDay === day.day ? (
-                            <div className="mt-4 p-3 bg-gray-50 rounded-lg border border-gray-200 animate-in fade-in slide-in-from-top-2">
-                                <div className="mb-2 flex gap-2">
+                            <div className="mt-4 p-3 bg-gray-50 rounded-lg border border-gray-200 animate-in fade-in slide-in-from-top-2 relative z-10">
+                                <div className="mb-2 flex items-center gap-2">
                                     <input
                                         type="time"
                                         value={selectedTime}
                                         onChange={(e) => setSelectedTime(e.target.value)}
-                                        className="border border-gray-300 rounded px-2 py-1 text-sm outline-none focus:border-blue-500"
+                                        className="w-24 bg-white border border-gray-300 rounded px-2 py-1 text-sm outline-none focus:border-blue-500"
                                     />
+                                    <span className="text-xs text-gray-500 flex-1 text-right">Select time & place/activity</span>
                                     <button
                                         onClick={() => setAddingToDay(null)}
-                                        className="text-xs text-gray-500 hover:text-gray-700 ml-auto"
+                                        className="h-8 w-8 p-0 flex items-center justify-center text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded"
                                     >
-                                        Cancel
+                                        <X className="w-4 h-4" />
                                     </button>
                                 </div>
                                 <div className="relative">
-                                    <PlaceSearch onSelect={(place) => handleAddSubmit(day.day, place)} placeholder="Search for a place to add..." />
+                                    <PlaceSearch onSelect={(place) => handleAddSubmit(day.day, place)} placeholder="Search (e.g. Eiffel Tower)..." />
                                 </div>
                             </div>
                         ) : (
                             <button
+                                className="w-full py-2 border-2 border-dashed border-gray-200 rounded-lg text-sm text-gray-500 hover:border-blue-300 hover:text-blue-600 hover:bg-blue-50 transition-all flex items-center justify-center gap-2"
                                 onClick={() => {
                                     setAddingToDay(day.day);
                                     setSelectedTime('09:00');
                                 }}
-                                className="w-full py-2 border-2 border-dashed border-gray-200 rounded-lg text-sm text-gray-500 hover:border-blue-300 hover:text-blue-600 hover:bg-blue-50 transition-all flex items-center justify-center gap-2"
                             >
-                                + Add Activity
+                                <Plus className="w-4 h-4 mr-2" /> Add Activity
                             </button>
                         )}
 

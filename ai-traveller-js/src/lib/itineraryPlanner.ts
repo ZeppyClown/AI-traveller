@@ -1,9 +1,11 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
+import { PromptTemplate } from "@langchain/core/prompts";
+import { StringOutputParser } from "@langchain/core/output_parsers";
+import { RunnableSequence } from "@langchain/core/runnables";
 import { GooglePlacesClient, PlaceDetails } from './googlePlaces';
 import { WeatherClient, WeatherData } from './weatherApi';
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
 interface DayPlan {
     day: number;
@@ -35,6 +37,8 @@ interface Activity {
     suggested_alternatives?: string[];
     weather_note?: string;
     type?: string;
+    id?: string;
+    photoUrl?: string;
 }
 
 export interface Itinerary {
@@ -47,12 +51,19 @@ export interface Itinerary {
 export class ItineraryPlanner {
     private placesClient: GooglePlacesClient;
     private weatherClient: WeatherClient;
-    private model: any;
+    private model: ChatGoogleGenerativeAI;
 
     constructor() {
         this.placesClient = new GooglePlacesClient();
         this.weatherClient = new WeatherClient();
-        this.model = genAI.getGenerativeModel({ model: 'gemini-pro' });
+
+        // Initialize LangChain Chat Model
+        this.model = new ChatGoogleGenerativeAI({
+            model: "gemini-pro",
+            maxOutputTokens: 2048,
+            apiKey: GEMINI_API_KEY,
+            temperature: 0.7,
+        });
     }
 
     async generateItinerary(
@@ -61,35 +72,93 @@ export class ItineraryPlanner {
         budget: string,
         travelDates?: string[],
         userPreferences?: string
-    ): Promise<Itinerary> {
+    ):
+        Promise<Itinerary> {
 
-        // 1. Get Popular Places
+        // 1. Get Context (Places & Weather)
         const popularPlaces = await this.placesClient.getPopularPlaces(destination);
 
-        // 2. Get Weather
+        let weatherInfo = "";
         let weatherForecast: WeatherData[] = [];
-        if (travelDates && travelDates.length > 0 && popularPlaces.length > 0) {
-            const loc = popularPlaces[0].location;
-            if (loc) {
-                weatherForecast = await this.weatherClient.getForecast(loc.lat, loc.lng, days);
+        if (travelDates && travelDates.length > 0 && popularPlaces.length > 0 && popularPlaces[0].location) {
+            weatherForecast = await this.weatherClient.getForecast(
+                popularPlaces[0].location.lat,
+                popularPlaces[0].location.lng,
+                days
+            );
+
+            if (weatherForecast.length > 0) {
+                weatherInfo = "WEATHER FORECAST:\n" + weatherForecast.map(f =>
+                    `Day ${f.date}: ${f.description}, ${f.temperature}°C` + (f.precipitation > 0 ? `, Rain: ${f.precipitation}mm` : '')
+                ).join("\n");
+                weatherInfo += "\nIMPORTANT: Adjust activities based on weather. If raining, prefer indoor activities.\n";
             }
         }
 
-        // 3. Prepare Prompt
         const placesInfo = this.formatPlacesForLLM(popularPlaces.slice(0, 30));
-        const prompt = this.createPrompt(destination, days, budget, placesInfo, weatherForecast, userPreferences);
 
-        // 4. Generate with Gemini
+        // 2. Define LangChain Template
+        const template = `Create a detailed {days}-day travel itinerary for {destination}.
+        
+        BUDGET: {budget}
+        
+        AVAILABLE PLACES:
+        {placesInfo}
+        
+        {weatherInfo}
+        
+        USER PREFERENCES:
+        {userPreferences}
+        
+        Please create a detailed day-by-day itinerary.
+        Structure the response as a valid JSON object with the following schema:
+        {{
+          "summary": "Brief overview",
+          "itinerary": [
+            {{
+              "day": 1,
+              "date": "YYYY-MM-DD",
+              "weather": "desc",
+              "morning": {{ "activities": [{{ "name": "Activity Name", "time": "09:00", "cost": "$20", "type": "outdoor" }}] }},
+              "afternoon": {{ "activities": [...] }},
+              "evening": {{ "activities": [...] }},
+              "meals": {{ "breakfast": "...", "lunch": "...", "dinner": "..." }},
+              "total_day_cost": "..."
+            }}
+          ],
+          "total_budget": "...",
+          "tips": ["..."]
+        }}
+        
+        Ensure the JSON is valid and contains no markdown formatting outside the JSON block.
+        `;
+
+        const prompt = PromptTemplate.fromTemplate(template);
+        const outputParser = new StringOutputParser();
+
+        // 3. Create Chain
+        const chain = RunnableSequence.from([
+            prompt,
+            this.model,
+            outputParser
+        ]);
+
+        // 4. Execute Chain
         try {
-            const result = await this.model.generateContent(prompt);
-            const response = await result.response;
-            const text = response.text();
+            const result = await chain.invoke({
+                days: days.toString(),
+                destination,
+                budget,
+                placesInfo,
+                weatherInfo,
+                userPreferences: userPreferences || "None"
+            });
 
-            // 5. Parse
-            const itinerary = this.parseItinerary(text, popularPlaces, weatherForecast);
-            return itinerary;
+            // 5. Parse and Enhance
+            return this.parseItinerary(result, popularPlaces, weatherForecast);
+
         } catch (e) {
-            console.error("Error generating itinerary:", e);
+            console.error("Error generating itinerary with LangChain:", e);
             throw e;
         }
     }
@@ -97,69 +166,14 @@ export class ItineraryPlanner {
     private formatPlacesForLLM(places: PlaceDetails[]): string {
         return places.map((p, i) => {
             let info = `${i + 1}. ${p.name}`;
-            if (p.rating) info += `\n   Rating: ${p.rating}/5`;
-            if (p.user_ratings_total) info += `\n   Reviews: ${p.user_ratings_total}`;
-            if (p.types) info += `\n   Type: ${p.types.slice(0, 3).join(', ').replace(/_/g, ' ')}`;
-            if (p.vicinity) info += `\n   Location: ${p.vicinity}`;
+            if (p.rating) info += ` (Rating: ${p.rating}/5)`;
+            if (p.types) info += ` [${p.types.slice(0, 2).join(', ').replace(/_/g, ' ')}]`;
             return info;
-        }).join('\n\n');
-    }
-
-    private createPrompt(
-        destination: string,
-        days: number,
-        budget: string,
-        placesInfo: string,
-        weatherForecast: WeatherData[],
-        userPreferences?: string
-    ): string {
-        let prompt = `Create a detailed ${days}-day travel itinerary for ${destination}.\n\nBUDGET: ${budget}\n\nAVAILABLE PLACES AND ATTRACTIONS:\n${placesInfo}\n\n`;
-
-        if (weatherForecast.length > 0) {
-            prompt += "WEATHER FORECAST:\n";
-            weatherForecast.forEach(f => {
-                prompt += `Day ${f.date}: ${f.description}, ${f.temperature}°C`;
-                if (f.precipitation > 0) prompt += `, Precipitation: ${f.precipitation}mm`;
-                prompt += "\n";
-            });
-            prompt += "\nIMPORTANT: Adjust activities based on weather. If it's raining, replace outdoor activities with indoor alternatives.\n\n";
-        }
-
-        if (userPreferences) {
-            prompt += `USER PREFERENCES: ${userPreferences}\n\n`;
-        }
-
-        prompt += `Please create a detailed day-by-day itinerary with:
-1. Day number and date
-2. Morning, Afternoon, Evening activities (with precise times)
-3. Meal recommendations
-4. Costs and travel times
-
-Format the response as pure JSON with this structure:
-{
-  "summary": "Brief overview",
-  "itinerary": [
-    {
-      "day": 1,
-      "date": "YYYY-MM-DD",
-      "weather": "desc",
-      "morning": { "activities": [{ "name": "Activity Name", "time": "09:00", "cost": "$20", "type": "outdoor/indoor" }] },
-      "afternoon": { "activities": [...] },
-      "evening": { "activities": [...] },
-      "meals": { "breakfast": "...", "lunch": "...", "dinner": "..." },
-      "total_day_cost": "..."
-    }
-  ],
-  "total_budget": "...",
-  "tips": ["..."]
-}
-Ensure the JSON is valid. Do not include markdown formatting.\n`;
-        return prompt;
+        }).join('\n');
     }
 
     private parseItinerary(text: string, places: PlaceDetails[], weatherForecast: WeatherData[]): Itinerary {
         try {
-            // clean text
             let cleanText = text.replace(/```json/g, '').replace(/```/g, '').trim();
             const start = cleanText.indexOf('{');
             const end = cleanText.lastIndexOf('}') + 1;
@@ -169,10 +183,8 @@ Ensure the JSON is valid. Do not include markdown formatting.\n`;
 
             const data: Itinerary = JSON.parse(cleanText);
 
-            // Enhance with real place data
             if (data.itinerary) {
                 data.itinerary.forEach((day, i) => {
-                    // Add weather data if available
                     if (i < weatherForecast.length) {
                         day.weather_data = weatherForecast[i];
                     }
@@ -182,14 +194,18 @@ Ensure the JSON is valid. Do not include markdown formatting.\n`;
                         const section = day[period];
                         if (section && section.activities) {
                             section.activities.forEach((activity: Activity) => {
+                                // Match with real place data
                                 const match = this.findMatchingPlace(activity.name, places);
                                 if (match) {
                                     activity.place_id = match.place_id;
                                     activity.location = match.location;
                                     activity.rating = match.rating;
                                     activity.address = match.address || match.vicinity;
-                                    activity.type = match.types?.[0]; // simple type
+                                    activity.type = match.types?.[0];
+                                    activity.photoUrl = match.photoUrl; // Pass photo if available
                                 }
+                                // Ensure ID
+                                activity.id = (activity.place_id || Date.now().toString()) + Math.random().toString(36).substr(2, 5);
                             });
                         }
                     });
@@ -197,7 +213,7 @@ Ensure the JSON is valid. Do not include markdown formatting.\n`;
             }
             return data;
         } catch (e) {
-            console.error("Failed to parse JSON", e);
+            console.error("Failed to parse JSON response:", text);
             return {
                 summary: "Error generating structured itinerary",
                 itinerary: [],

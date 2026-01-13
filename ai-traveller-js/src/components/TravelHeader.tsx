@@ -12,7 +12,7 @@ export default function TravelHeader({ destination, days, budget, onBack }: Trav
         <div className="p-4 bg-white border-b border-gray-200 flex items-center gap-4">
             <button
                 onClick={onBack}
-                className="p-2 hover:bg-gray-100 rounded-full transition-colors"
+                className="p-2 hover:bg-gray-100 rounded-full transition-colors flex items-center justify-center"
             >
                 <ArrowLeft className="w-5 h-5 text-gray-600" />
             </button>
