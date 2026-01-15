@@ -57,27 +57,37 @@ function TravelPageContent() {
     useEffect(() => {
         if (!destination) return;
 
-        const fetchPlaces = async () => {
+        // Only fetch coordinates for map center, don't populate "popularPlaces" (suggestions) yet
+        const fetchCoordinates = async () => {
             try {
+                // We use the simpler search/autocomplete endpoint just to get the lat/lng of the city
+                // Or we can use the popular endpoint but just take the first result and NOT setPopularPlaces
                 const res = await axios.get('/api/places/popular', { params: { location: destination } });
                 const places: PlaceDetails[] = res.data;
-                setPopularPlaces(places);
 
                 if (places.length > 0 && places[0].location) {
                     setMapCenter([places[0].location.lat, places[0].location.lng]);
                 }
             } catch (e) {
-                console.error("Failed to fetch places", e);
+                console.error("Failed to fetch destination coordinates", e);
             } finally {
                 setLoadingPlaces(false);
             }
         };
 
-        fetchPlaces();
+        fetchCoordinates();
     }, [destination]);
 
     const generateItinerary = async () => {
         setLoadingItinerary(true);
+        // Also fetch popular places now if we haven't
+        if (popularPlaces.length === 0) {
+            try {
+                const res = await axios.get('/api/places/popular', { params: { location: destination } });
+                setPopularPlaces(res.data);
+            } catch (e) { console.error("Failed to fetch places", e); }
+        }
+
         try {
             const res = await axios.post('/api/itinerary', {
                 destination,
@@ -235,7 +245,7 @@ function TravelPageContent() {
             <div className="flex-1 relative bg-gray-100">
                 <Map
                     center={mapCenter}
-                    places={popularPlaces}
+                    places={[]} /* Don't show popular places on map as requested */
                     itinerary={itinerary?.itinerary}
                 />
             </div>
