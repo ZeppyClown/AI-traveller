@@ -90,7 +90,7 @@ export default function Map({ center, zoom = 12, places = [], itinerary = [] }: 
             });
         });
         return coords;
-    }, [itinerary, selectedDay]);
+    }, [JSON.stringify(itinerary), selectedDay]);
 
     const [activeMarker, setActiveMarker] = useState<string | null>(null);
     const [routeMetrics, setRouteMetrics] = useState<any[]>([]);
