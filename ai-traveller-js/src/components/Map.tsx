@@ -94,50 +94,78 @@ export default function Map({ center, zoom = 12, places = [], itinerary = [] }: 
 
     const [activeMarker, setActiveMarker] = useState<string | null>(null);
     const [routeMetrics, setRouteMetrics] = useState<any[]>([]);
+    const [routeGeometries, setRouteGeometries] = useState<{ lat: number; lng: number }[][]>([]);
+
+    // Format duration from seconds to human-readable format
+    const formatDuration = (seconds: number): string => {
+        const hours = Math.floor(seconds / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        if (hours > 0) {
+            return `${hours}h ${minutes}m`;
+        }
+        return `${minutes}m`;
+    };
+
+    // Format distance from meters to km
+    const formatDistance = (meters: number): string => {
+        const km = meters / 1000;
+        return `${km.toFixed(1)} km`;
+    };
 
     useEffect(() => {
-        if (!isLoaded || routeCoords.length < 2) {
+        if (routeCoords.length < 2) {
             setRouteMetrics([]);
+            setRouteGeometries([]);
             return;
         }
 
         const calculateRoutes = async () => {
-            const service = new google.maps.DistanceMatrixService();
-            const origins = routeCoords.slice(0, -1);
-            const destinations = routeCoords.slice(1);
-
-            // Limit to avoid API errors (max 25 locations typically)
-            if (origins.length > 25) {
-                console.warn("Too many stops for distance matrix demo");
-                return;
-            }
-
             try {
-                const response = await service.getDistanceMatrix({
-                    origins: origins.map(p => ({ lat: p.lat, lng: p.lng })),
-                    destinations: destinations.map(p => ({ lat: p.lat, lng: p.lng })),
-                    travelMode: google.maps.TravelMode.DRIVING,
-                });
+                // Build OSRM coordinates string (lon,lat format - note the order!)
+                const coordinates = routeCoords
+                    .map(coord => `${coord.lng},${coord.lat}`)
+                    .join(';');
 
-                const metrics = origins.map((origin, index) => {
-                    // The diagonal elements [index][index] represent the sequential segments
-                    const element = response.rows[index].elements[index];
-                    return {
-                        from: origin.name,
-                        to: destinations[index].name,
-                        distance: element.distance?.text,
-                        duration: element.duration?.text
-                    };
-                });
+                // Call OSRM API for the full route
+                const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${coordinates}?overview=full&geometries=geojson&steps=true`;
+
+                const response = await fetch(osrmUrl);
+                const data = await response.json();
+
+                if (data.code !== 'Ok' || !data.routes || data.routes.length === 0) {
+                    console.error('OSRM routing error:', data);
+                    return;
+                }
+
+                const route = data.routes[0];
+
+                // Extract the full route geometry
+                const geometry = route.geometry.coordinates.map((coord: [number, number]) => ({
+                    lng: coord[0],
+                    lat: coord[1]
+                }));
+                setRouteGeometries([geometry]);
+
+                // Calculate metrics for each leg (segment between consecutive waypoints)
+                const legs = route.legs;
+                const metrics = legs.map((leg: any, index: number) => ({
+                    from: routeCoords[index].name,
+                    to: routeCoords[index + 1].name,
+                    distance: formatDistance(leg.distance),
+                    duration: formatDuration(leg.duration)
+                }));
+
                 setRouteMetrics(metrics);
             } catch (error) {
-                console.error("Distance Matrix error:", error);
+                console.error('OSRM routing error:', error);
+                setRouteMetrics([]);
+                setRouteGeometries([]);
             }
         };
 
         calculateRoutes();
 
-    }, [isLoaded, routeCoords]);
+    }, [routeCoords]);
 
 
     const handleMarkerClick = (id: string) => {
@@ -282,17 +310,18 @@ export default function Map({ center, zoom = 12, places = [], itinerary = [] }: 
                     );
                 })}
 
-                {/* Itinerary Route */}
-                {routeCoords.length > 1 && (
+                {/* OSRM Route Geometry */}
+                {routeGeometries.map((geometry, idx) => (
                     <PolylineF
-                        path={routeCoords}
+                        key={idx}
+                        path={geometry}
                         options={{
                             strokeColor: selectedDay !== null ? getDayColor(selectedDay) : "#2563EB",
                             strokeOpacity: 0.8,
                             strokeWeight: 4,
                         }}
                     />
-                )}
+                ))}
             </GoogleMap>
         </div>
     );
